@@ -99,3 +99,6 @@ googleapis-common-protos==1.63.2
 
 ## LDAP
 ldap3==2.9.1
+
+## Directory Sync
+apscheduler==3.11.0

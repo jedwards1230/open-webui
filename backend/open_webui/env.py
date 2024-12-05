@@ -394,3 +394,13 @@ else:
 ####################################
 
 OFFLINE_MODE = os.environ.get("OFFLINE_MODE", "false").lower() == "true"
+
+####################################
+# GIT_SYNCING
+####################################
+
+GITHUB_PAT_TOKEN = os.getenv("GITHUB_PAT_TOKEN")
+GITHUB_SYNC_INTERVAL = int(
+    os.getenv("GITHUB_SYNC_INTERVAL", 24)  # Default to every 24 hours
+)
+GITHUB_SYNC_AUTO_UPDATE = os.getenv("GITHUB_SYNC_AUTO_UPDATE", "true").lower() == "true"
