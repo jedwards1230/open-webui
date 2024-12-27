@@ -272,6 +272,18 @@ ENABLE_API_KEY = PersistentConfig(
     os.environ.get("ENABLE_API_KEY", "True").lower() == "true",
 )
 
+ENABLE_API_KEY_ENDPOINT_RESTRICTIONS = PersistentConfig(
+    "ENABLE_API_KEY_ENDPOINT_RESTRICTIONS",
+    "auth.api_key.endpoint_restrictions",
+    os.environ.get("ENABLE_API_KEY_ENDPOINT_RESTRICTIONS", "False").lower() == "true",
+)
+
+API_KEY_ALLOWED_ENDPOINTS = PersistentConfig(
+    "API_KEY_ALLOWED_ENDPOINTS",
+    "auth.api_key.allowed_endpoints",
+    os.environ.get("API_KEY_ALLOWED_ENDPOINTS", ""),
+)
+
 
 JWT_EXPIRES_IN = PersistentConfig(
     "JWT_EXPIRES_IN", "auth.jwt_expiry", os.environ.get("JWT_EXPIRES_IN", "-1")
@@ -306,6 +318,7 @@ GOOGLE_CLIENT_SECRET = PersistentConfig(
     "oauth.google.client_secret",
     os.environ.get("GOOGLE_CLIENT_SECRET", ""),
 )
+
 
 GOOGLE_OAUTH_SCOPE = PersistentConfig(
     "GOOGLE_OAUTH_SCOPE",
@@ -708,6 +721,12 @@ OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 # WEBUI
 ####################################
 
+
+WEBUI_URL = PersistentConfig(
+    "WEBUI_URL", "webui.url", os.environ.get("WEBUI_URL", "http://localhost:3000")
+)
+
+
 ENABLE_SIGNUP = PersistentConfig(
     "ENABLE_SIGNUP",
     "ui.enable_signup",
@@ -833,6 +852,12 @@ USER_PERMISSIONS = PersistentConfig(
             "temporary": USER_PERMISSIONS_CHAT_TEMPORARY,
         },
     },
+)
+
+ENABLE_CHANNELS = PersistentConfig(
+    "ENABLE_CHANNELS",
+    "channels.enable",
+    os.environ.get("ENABLE_CHANNELS", "False").lower() == "true",
 )
 
 
@@ -1191,6 +1216,26 @@ if VECTOR_DB == "pgvector" and not PGVECTOR_DB_URL.startswith("postgres"):
 # Information Retrieval (RAG)
 ####################################
 
+
+# If configured, Google Drive will be available as an upload option.
+ENABLE_GOOGLE_DRIVE_INTEGRATION = PersistentConfig(
+    "ENABLE_GOOGLE_DRIVE_INTEGRATION",
+    "google_drive.enable",
+    os.getenv("ENABLE_GOOGLE_DRIVE_INTEGRATION", "False").lower() == "true",
+)
+
+GOOGLE_DRIVE_CLIENT_ID = PersistentConfig(
+    "GOOGLE_DRIVE_CLIENT_ID",
+    "google_drive.client_id",
+    os.environ.get("GOOGLE_DRIVE_CLIENT_ID", ""),
+)
+
+GOOGLE_DRIVE_API_KEY = PersistentConfig(
+    "GOOGLE_DRIVE_API_KEY",
+    "google_drive.api_key",
+    os.environ.get("GOOGLE_DRIVE_API_KEY", ""),
+)
+
 # RAG Content Extraction
 CONTENT_EXTRACTION_ENGINE = PersistentConfig(
     "CONTENT_EXTRACTION_ENGINE",
@@ -1425,6 +1470,7 @@ RAG_WEB_SEARCH_DOMAIN_FILTER_LIST = PersistentConfig(
         # "wikidata.org",
     ],
 )
+
 
 SEARXNG_QUERY_URL = PersistentConfig(
     "SEARXNG_QUERY_URL",

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 	import { v4 as uuidv4 } from 'uuid';
+	import { createPicker, getAuthToken } from '$lib/utils/google-drive-picker';
 
 	import { onMount, tick, getContext, createEventDispatcher, onDestroy } from 'svelte';
 	const dispatch = createEventDispatcher();
@@ -18,7 +19,7 @@
 		showControls
 	} from '$lib/stores';
 
-	import { blobToFile, createMessagesList, findWordIndices } from '$lib/utils';
+	import { blobToFile, compressImage, createMessagesList, findWordIndices } from '$lib/utils';
 	import { transcribeAudio } from '$lib/apis/audio';
 	import { uploadFile } from '$lib/apis/files';
 	import { getTools } from '$lib/apis/tools';
@@ -42,12 +43,13 @@
 
 	export let transparentBackground = false;
 
+	export let onChange: Function = () => {};
 	export let createMessagePair: Function;
 	export let stopResponse: Function;
 
 	export let autoScroll = false;
 
-	export let atSelectedModel: Model | undefined;
+	export let atSelectedModel: Model | undefined = undefined;
 	export let selectedModels: [''];
 
 	let selectedModelIds = [];
@@ -60,6 +62,13 @@
 
 	export let selectedToolIds = [];
 	export let webSearchEnabled = false;
+
+	$: onChange({
+		prompt,
+		files,
+		selectedToolIds,
+		webSearchEnabled
+	});
 
 	let loaded = false;
 	let recording = false;
@@ -132,8 +141,6 @@
 			return null;
 		}
 
-		console.log(file);
-
 		const tempItemId = uuidv4();
 		const fileItem = {
 			type: 'file',
@@ -177,14 +184,22 @@
 			const uploadedFile = await uploadFile(localStorage.token, file);
 
 			if (uploadedFile) {
+				console.log('File upload completed:', {
+					id: uploadedFile.id,
+					name: fileItem.name,
+					collection: uploadedFile?.meta?.collection_name
+				});
+
 				if (uploadedFile.error) {
+					console.warn('File upload warning:', uploadedFile.error);
 					toast.warning(uploadedFile.error);
 				}
 
 				fileItem.status = 'uploaded';
 				fileItem.file = uploadedFile;
 				fileItem.id = uploadedFile.id;
-				fileItem.collection_name = uploadedFile?.meta?.collection_name;
+				fileItem.collection_name =
+					uploadedFile?.meta?.collection_name || uploadedFile?.collection_name;
 				fileItem.url = `${WEBUI_API_BASE_URL}/files/${uploadedFile.id}`;
 
 				files = files;
@@ -198,13 +213,23 @@
 	};
 
 	const inputFilesHandler = async (inputFiles) => {
+		console.log('Input files handler called with:', inputFiles);
 		inputFiles.forEach((file) => {
-			console.log(file, file.name.split('.').at(-1));
+			console.log('Processing file:', {
+				name: file.name,
+				type: file.type,
+				size: file.size,
+				extension: file.name.split('.').at(-1)
+			});
 
 			if (
 				($config?.file?.max_size ?? null) !== null &&
 				file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
 			) {
+				console.log('File exceeds max size limit:', {
+					fileSize: file.size,
+					maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
+				});
 				toast.error(
 					$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
 						maxSize: $config?.file?.max_size
@@ -219,12 +244,23 @@
 					return;
 				}
 				let reader = new FileReader();
-				reader.onload = (event) => {
+				reader.onload = async (event) => {
+					let imageUrl = event.target.result;
+
+					if ($settings?.imageCompression ?? false) {
+						const width = $settings?.imageCompressionSize?.width ?? null;
+						const height = $settings?.imageCompressionSize?.height ?? null;
+
+						if (width || height) {
+							imageUrl = await compressImage(imageUrl, width, height);
+						}
+					}
+
 					files = [
 						...files,
 						{
 							type: 'image',
-							url: `${event.target.result}`
+							url: `${imageUrl}`
 						}
 					];
 				};
@@ -310,7 +346,11 @@
 {#if loaded}
 	<div class="w-full font-primary">
 		<div class=" mx-auto inset-x-0 bg-transparent flex justify-center">
-			<div class="flex flex-col px-3 max-w-6xl w-full">
+			<div
+				class="flex flex-col px-3 {($settings?.widescreenMode ?? null)
+					? 'max-w-full'
+					: 'max-w-6xl'} w-full"
+			>
 				<div class="relative">
 					{#if autoScroll === false && history?.currentId}
 						<div
@@ -448,7 +488,11 @@
 		</div>
 
 		<div class="{transparentBackground ? 'bg-transparent' : 'bg-white dark:bg-gray-900'} ">
-			<div class="max-w-6xl px-2.5 mx-auto inset-x-0">
+			<div
+				class="{($settings?.widescreenMode ?? null)
+					? 'max-w-full'
+					: 'max-w-6xl'} px-2.5 mx-auto inset-x-0"
+			>
 				<div class="">
 					<input
 						bind:this={filesInputElement}
@@ -593,6 +637,26 @@
 											uploadFilesHandler={() => {
 												filesInputElement.click();
 											}}
+											uploadGoogleDriveHandler={async () => {
+												try {
+													const fileData = await createPicker();
+													if (fileData) {
+														const file = new File([fileData.blob], fileData.name, {
+															type: fileData.blob.type
+														});
+														await uploadFileHandler(file);
+													} else {
+														console.log('No file was selected from Google Drive');
+													}
+												} catch (error) {
+													console.error('Google Drive Error:', error);
+													toast.error(
+														$i18n.t('Error accessing Google Drive: {{error}}', {
+															error: error.message
+														})
+													);
+												}
+											}}
 											onClose={async () => {
 												await tick();
 
@@ -665,6 +729,10 @@
 													const commandsContainerElement =
 														document.getElementById('commands-container');
 
+													if (e.key === 'Escape') {
+														stopResponse();
+													}
+
 													// Command/Ctrl + Shift + Enter to submit a message pair
 													if (isCtrlPressed && e.key === 'Enter' && e.shiftKey) {
 														e.preventDefault();
@@ -690,14 +758,14 @@
 															...document.getElementsByClassName('user-message')
 														]?.at(-1);
 
-														const editButton = [
-															...document.getElementsByClassName('edit-user-message-button')
-														]?.at(-1);
+														if (userMessageElement) {
+															userMessageElement.scrollIntoView({ block: 'center' });
+															const editButton = [
+																...document.getElementsByClassName('edit-user-message-button')
+															]?.at(-1);
 
-														console.log(userMessageElement);
-
-														userMessageElement.scrollIntoView({ block: 'center' });
-														editButton?.click();
+															editButton?.click();
+														}
 													}
 
 													if (commandsContainerElement) {
@@ -848,6 +916,9 @@
 												const commandsContainerElement =
 													document.getElementById('commands-container');
 
+												if (e.key === 'Escape') {
+													stopResponse();
+												}
 												// Command/Ctrl + Shift + Enter to submit a message pair
 												if (isCtrlPressed && e.key === 'Enter' && e.shiftKey) {
 													e.preventDefault();

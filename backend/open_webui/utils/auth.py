@@ -95,6 +95,18 @@ def get_current_user(
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.API_KEY_NOT_ALLOWED
             )
+
+        if request.app.state.ENABLE_API_KEY_ENDPOINT_RESTRICTIONS:
+            allowed_paths = [
+                path.strip()
+                for path in str(request.app.state.API_KEY_ALLOWED_PATHS).split(",")
+            ]
+
+            if request.url.path not in allowed_paths:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.API_KEY_NOT_ALLOWED
+                )
+
         return get_current_user_by_api_key(token)
 
     # auth by jwt token

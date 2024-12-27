@@ -5,13 +5,16 @@ import sys
 import time
 
 from open_webui.models.users import Users
+from open_webui.models.channels import Channels
+from open_webui.models.chats import Chats
+
 from open_webui.env import (
     ENABLE_WEBSOCKET_SUPPORT,
     WEBSOCKET_MANAGER,
     WEBSOCKET_REDIS_URL,
 )
 from open_webui.utils.auth import decode_token
-from open_webui.socket.utils import RedisDict
+from open_webui.socket.utils import RedisDict, RedisLock
 
 from open_webui.env import (
     GLOBAL_LOG_LEVEL,
@@ -29,9 +32,7 @@ if WEBSOCKET_MANAGER == "redis":
     sio = socketio.AsyncServer(
         cors_allowed_origins=[],
         async_mode="asgi",
-        transports=(
-            ["polling", "websocket"] if ENABLE_WEBSOCKET_SUPPORT else ["polling"]
-        ),
+        transports=(["websocket"] if ENABLE_WEBSOCKET_SUPPORT else ["polling"]),
         allow_upgrades=ENABLE_WEBSOCKET_SUPPORT,
         always_connect=True,
         client_manager=mgr,
@@ -40,54 +41,77 @@ else:
     sio = socketio.AsyncServer(
         cors_allowed_origins=[],
         async_mode="asgi",
-        transports=(
-            ["polling", "websocket"] if ENABLE_WEBSOCKET_SUPPORT else ["polling"]
-        ),
+        transports=(["websocket"] if ENABLE_WEBSOCKET_SUPPORT else ["polling"]),
         allow_upgrades=ENABLE_WEBSOCKET_SUPPORT,
         always_connect=True,
     )
 
 
+# Timeout duration in seconds
+TIMEOUT_DURATION = 3
+
 # Dictionary to maintain the user pool
 
 if WEBSOCKET_MANAGER == "redis":
+    log.debug("Using Redis to manage websockets.")
     SESSION_POOL = RedisDict("open-webui:session_pool", redis_url=WEBSOCKET_REDIS_URL)
     USER_POOL = RedisDict("open-webui:user_pool", redis_url=WEBSOCKET_REDIS_URL)
     USAGE_POOL = RedisDict("open-webui:usage_pool", redis_url=WEBSOCKET_REDIS_URL)
+
+    clean_up_lock = RedisLock(
+        redis_url=WEBSOCKET_REDIS_URL,
+        lock_name="usage_cleanup_lock",
+        timeout_secs=TIMEOUT_DURATION * 2,
+    )
+    aquire_func = clean_up_lock.aquire_lock
+    renew_func = clean_up_lock.renew_lock
+    release_func = clean_up_lock.release_lock
 else:
     SESSION_POOL = {}
     USER_POOL = {}
     USAGE_POOL = {}
-
-
-# Timeout duration in seconds
-TIMEOUT_DURATION = 3
+    aquire_func = release_func = renew_func = lambda: True
 
 
 async def periodic_usage_pool_cleanup():
-    while True:
-        now = int(time.time())
-        for model_id, connections in list(USAGE_POOL.items()):
-            # Creating a list of sids to remove if they have timed out
-            expired_sids = [
-                sid
-                for sid, details in connections.items()
-                if now - details["updated_at"] > TIMEOUT_DURATION
-            ]
+    if not aquire_func():
+        log.debug("Usage pool cleanup lock already exists. Not running it.")
+        return
+    log.debug("Running periodic_usage_pool_cleanup")
+    try:
+        while True:
+            if not renew_func():
+                log.error(f"Unable to renew cleanup lock. Exiting usage pool cleanup.")
+                raise Exception("Unable to renew usage pool cleanup lock.")
 
-            for sid in expired_sids:
-                del connections[sid]
+            now = int(time.time())
+            send_usage = False
+            for model_id, connections in list(USAGE_POOL.items()):
+                # Creating a list of sids to remove if they have timed out
+                expired_sids = [
+                    sid
+                    for sid, details in connections.items()
+                    if now - details["updated_at"] > TIMEOUT_DURATION
+                ]
 
-            if not connections:
-                log.debug(f"Cleaning up model {model_id} from usage pool")
-                del USAGE_POOL[model_id]
-            else:
-                USAGE_POOL[model_id] = connections
+                for sid in expired_sids:
+                    del connections[sid]
 
-            # Emit updated usage information after cleaning
-            await sio.emit("usage", {"models": get_models_in_use()})
+                if not connections:
+                    log.debug(f"Cleaning up model {model_id} from usage pool")
+                    del USAGE_POOL[model_id]
+                else:
+                    USAGE_POOL[model_id] = connections
 
-        await asyncio.sleep(TIMEOUT_DURATION)
+                send_usage = True
+
+            if send_usage:
+                # Emit updated usage information after cleaning
+                await sio.emit("usage", {"models": get_models_in_use()})
+
+            await asyncio.sleep(TIMEOUT_DURATION)
+    finally:
+        release_func()
 
 
 app = socketio.ASGIApp(
@@ -130,7 +154,7 @@ async def connect(sid, environ, auth):
         if user:
             SESSION_POOL[sid] = user.id
             if user.id in USER_POOL:
-                USER_POOL[user.id].append(sid)
+                USER_POOL[user.id] = USER_POOL[user.id] + [sid]
             else:
                 USER_POOL[user.id] = [sid]
 
@@ -141,7 +165,6 @@ async def connect(sid, environ, auth):
 
 @sio.on("user-join")
 async def user_join(sid, data):
-    # print("user-join", sid, data)
 
     auth = data["auth"] if "auth" in data else None
     if not auth or "token" not in auth:
@@ -157,13 +180,41 @@ async def user_join(sid, data):
 
     SESSION_POOL[sid] = user.id
     if user.id in USER_POOL:
-        USER_POOL[user.id].append(sid)
+        USER_POOL[user.id] = USER_POOL[user.id] + [sid]
     else:
         USER_POOL[user.id] = [sid]
+
+    # Join all the channels
+    channels = Channels.get_channels_by_user_id(user.id)
+    log.debug(f"{channels=}")
+    for channel in channels:
+        await sio.enter_room(sid, f"channel:{channel.id}")
 
     # print(f"user {user.name}({user.id}) connected with session ID {sid}")
 
     await sio.emit("user-count", {"count": len(USER_POOL.items())})
+    return {"id": user.id, "name": user.name}
+
+
+@sio.on("join-channels")
+async def join_channel(sid, data):
+    auth = data["auth"] if "auth" in data else None
+    if not auth or "token" not in auth:
+        return
+
+    data = decode_token(auth["token"])
+    if data is None or "id" not in data:
+        return
+
+    user = Users.get_user_by_id(data["id"])
+    if not user:
+        return
+
+    # Join all the channels
+    channels = Channels.get_channels_by_user_id(user.id)
+    log.debug(f"{channels=}")
+    for channel in channels:
+        await sio.enter_room(sid, f"channel:{channel.id}")
 
 
 @sio.on("user-count")
@@ -195,15 +246,28 @@ async def disconnect(sid):
 
 def get_event_emitter(request_info):
     async def __event_emitter__(event_data):
-        await sio.emit(
-            "chat-events",
-            {
-                "chat_id": request_info["chat_id"],
-                "message_id": request_info["message_id"],
-                "data": event_data,
-            },
-            to=request_info["session_id"],
+        user_id = request_info["user_id"]
+        session_ids = list(
+            set(USER_POOL.get(user_id, []) + [request_info["session_id"]])
         )
+
+        for session_id in session_ids:
+            await sio.emit(
+                "chat-events",
+                {
+                    "chat_id": request_info["chat_id"],
+                    "message_id": request_info["message_id"],
+                    "data": event_data,
+                },
+                to=session_id,
+            )
+
+        if "type" in event_data and event_data["type"] == "status":
+            Chats.add_message_status_to_chat_by_id_and_message_id(
+                request_info["chat_id"],
+                request_info["message_id"],
+                event_data.get("data", {}),
+            )
 
     return __event_emitter__
 
@@ -222,3 +286,19 @@ def get_event_call(request_info):
         return response
 
     return __event_call__
+
+
+def get_user_id_from_session_pool(sid):
+    return SESSION_POOL.get(sid)
+
+
+def get_user_ids_from_room(room):
+    active_session_ids = sio.manager.get_participants(
+        namespace="/",
+        room=room,
+    )
+
+    active_user_ids = list(
+        set([SESSION_POOL.get(session_id[0]) for session_id in active_session_ids])
+    )
+    return active_user_ids
